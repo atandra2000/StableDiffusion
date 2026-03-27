@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint dependencies
+        run: pip install flake8 pyflakes
+
+      - name: Lint — model.py
+        run: flake8 src/model.py --max-line-length=120 --ignore=E501,W503,E203
+
+      - name: Lint — train.py
+        run: flake8 src/train.py --max-line-length=120 --ignore=E501,W503,E203
+
+      - name: Lint — encode_pipeline.py
+        run: flake8 src/encode_pipeline.py --max-line-length=120 --ignore=E501,W503,E203
+
+      - name: Lint — data pipeline scripts
+        run: |
+          flake8 data_pipeline/ --max-line-length=120 --ignore=E501,W503,E203
+
+      - name: Install CPU-only PyTorch for smoke tests
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers accelerate
+
+      - name: Smoke test — model import and forward pass (CPU)
+        run: |
+          python - <<'EOF'
+          import sys
+          sys.path.insert(0, "src")
+
+          import torch
+          torch.set_default_device("cpu")
+
+          from model import (
+              ResNetBlock, AttentionBlock, CrossAttention,
+              TransformerBlock, SpatialTransformer,
+              UNetResBlock, UNetModel,
+              DDPMScheduler, DDIMScheduler,
+          )
+
+          # DDPMScheduler — noise forward pass
+          sched = DDPMScheduler(steps=1000)
+          x     = torch.randn(2, 4, 8, 8)
+          t     = torch.randint(0, 1000, (2,))
+          x_t, noise = sched.add_noise(x, t)
+          assert x_t.shape == x.shape, "DDPM add_noise shape mismatch"
+
+          # DDIMScheduler — timestep setup
+          ddim = DDIMScheduler(steps=1000)
+          ddim.set_timesteps(4, device="cpu")
+          assert ddim.timesteps.shape[0] == 4, "DDIM timesteps count wrong"
+
+          # Tiny UNet forward pass (reduced dims for speed)
+          unet = UNetModel(
+              in_ch=4, out_ch=4, ch=32,
+              res_blks=1, attn_lvls=(1,),
+              ch_mults=(1, 2), heads=2,
+              t_dim=32, ctx_dim=64,
+          )
+          unet.eval()
+          with torch.no_grad():
+              latent = torch.randn(1, 4, 8, 8)
+              t_in   = torch.randint(0, 1000, (1,))
+              ctx    = torch.randn(1, 4, 64)   # (B, seq_len, ctx_dim)
+              out    = unet(latent, t_in, ctx)
+          assert out.shape == latent.shape, f"UNet output shape {out.shape} != {latent.shape}"
+
+          # Parameter count
+          total = sum(p.numel() for p in unet.parameters())
+          print(f"Tiny UNet params: {total:,}")
+
+          print("All smoke tests passed.")
+          EOF
+
+      - name: Smoke test — config import
+        run: |
+          python - <<'EOF'
+          import sys
+          sys.path.insert(0, "configs")
+          from config import SDConfig
+          cfg = SDConfig()
+          assert cfg.model.ch == 320
+          assert cfg.training.ema_decay == 0.9999
+          assert cfg.scheduler.guidance_scale == 7.5
+          print("Config smoke test passed.")
+          EOF

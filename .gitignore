@@ -1,0 +1,45 @@
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.env
+.venv
+venv/
+
+# Checkpoints and model weights
+*.pt
+*.pth
+*.safetensors
+checkpoints/
+outputs/
+
+# Large dataset files
+*.npy
+*.parquet
+*.tar
+*.zip
+laion_*/
+/workspace/
+
+# Training logs and wandb
+*.log
+wandb/
+training.log
+
+# Generated images
+val_epoch_*.png
+results/*.png
+!assets/*.png
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
