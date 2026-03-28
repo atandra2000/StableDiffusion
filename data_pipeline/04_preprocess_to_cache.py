@@ -17,7 +17,6 @@ import tarfile
 import logging
 import argparse
 import time
-import traceback
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 

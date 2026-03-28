@@ -46,9 +46,7 @@ Usage:
   python3 02_filter_metadata.py --max_samples 5000000  # Cap at 5M
 """
 
-import os
 import sys
-import glob
 import logging
 import argparse
 import time

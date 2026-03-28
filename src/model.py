@@ -49,7 +49,7 @@ class PretrainedVAE(nn.Module):
     The VAE is permanently frozen — its weights are never updated.
     The scale factor (0.18215) is the empirical std of the LAION-2B latent
     distribution and normalises latents to unit variance for stable training.
-    
+
     Optimizations:
     - Direct encoder access (bypasses latent_dist.sample() overhead)
     - Uses mean instead of sampling for deterministic, faster inference
@@ -61,13 +61,13 @@ class PretrainedVAE(nn.Module):
     def __init__(self, model_id: str = "stabilityai/sd-vae-ft-mse", use_fp16: bool = True):
         super().__init__()
         from diffusers import AutoencoderKL
-        
+
         # Load with fp16 for faster inference if requested
         if use_fp16:
             self.vae = AutoencoderKL.from_pretrained(model_id, torch_dtype=torch.float16)
         else:
             self.vae = AutoencoderKL.from_pretrained(model_id)
-        
+
         self.vae.requires_grad_(False)
         self.vae.eval()
         self.use_fp16 = use_fp16
@@ -77,7 +77,7 @@ class PretrainedVAE(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """
         Optimized encode: direct encoder access, uses mean instead of sampling.
-        
+
         Args:
             x: Float tensor in [-1, 1], shape (B, 3, H, W).
         Returns:
@@ -86,25 +86,25 @@ class PretrainedVAE(nn.Module):
         # Convert to fp16 if needed (faster)
         if self.use_fp16 and x.dtype != torch.float16:
             x = x.to(dtype=torch.float16)
-        
+
         # Direct encoder access - MUCH faster than going through .encode()
         # The encoder outputs moments: [mean, logvar] concatenated
         moments = self.vae.encoder(x)
-        
+
         # Split into mean and logvar
         mean, logvar = torch.chunk(moments, 2, dim=1)
-        
+
         # Use mean for deterministic encoding (faster than sampling)
         # For training, you'd want sampling, but for inference, mean is fine
         latents = mean * self.scale_factor
-        
+
         return latents
 
     @torch.no_grad()
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         """
         Decode scaled latents back to pixel images.
-        
+
         Args:
             z: Scaled latents (B, 4, H//8, W//8).
         Returns:
@@ -113,13 +113,13 @@ class PretrainedVAE(nn.Module):
         # Convert to fp16 if needed
         if self.use_fp16 and z.dtype != torch.float16:
             z = z.to(dtype=torch.float16)
-        
+
         # Scale back
         z = z / self.scale_factor
-        
+
         # Direct decoder access (bypass .decode() overhead)
         decoded = self.vae.decoder(z)
-        
+
         return decoded
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -307,7 +307,7 @@ class TransformerBlock(nn.Module):
     def forward(self, x: torch.Tensor, ctx: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = x + self.self_attn(self.ln1(x))           # self-attention
         if ctx is not None:
-            x = x + self.cross_attn(self.ln2(x), ctx) # text cross-attention
+            x = x + self.cross_attn(self.ln2(x), ctx)  # text cross-attention
         return x + self.mlp(self.ln3(x))              # feed-forward MLP
 
 

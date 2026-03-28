@@ -9,8 +9,6 @@ import argparse
 import logging
 import warnings
 warnings.filterwarnings("ignore")
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
