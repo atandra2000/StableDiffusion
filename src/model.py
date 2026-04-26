@@ -1,7 +1,7 @@
 """
 SD_Model.py
 ===========
-Core model architecture for Stable Diffusion training on 2× RTX PRO 4500.
+Core model architecture for Stable Diffusion training on 2× RTX 5090.
 
 Components
 ----------
@@ -76,29 +76,16 @@ class PretrainedVAE(nn.Module):
     @torch.no_grad()
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Optimized encode: direct encoder access, uses mean instead of sampling.
+        Encode images to scaled latents using the HF AutoencoderKL API.
 
         Args:
             x: Float tensor in [-1, 1], shape (B, 3, H, W).
         Returns:
             Scaled latents (B, 4, H//8, W//8).
         """
-        # Convert to fp16 if needed (faster)
-        if self.use_fp16 and x.dtype != torch.float16:
-            x = x.to(dtype=torch.float16)
-
-        # Direct encoder access - MUCH faster than going through .encode()
-        # The encoder outputs moments: [mean, logvar] concatenated
-        moments = self.vae.encoder(x)
-
-        # Split into mean and logvar
-        mean, logvar = torch.chunk(moments, 2, dim=1)
-
-        # Use mean for deterministic encoding (faster than sampling)
-        # For training, you'd want sampling, but for inference, mean is fine
-        latents = mean * self.scale_factor
-
-        return latents
+        dtype = torch.float16 if self.use_fp16 else x.dtype
+        mean = self.vae.encode(x.to(dtype=dtype)).latent_dist.mean
+        return mean * self.scale_factor
 
     @torch.no_grad()
     def decode(self, z: torch.Tensor) -> torch.Tensor:
@@ -110,17 +97,9 @@ class PretrainedVAE(nn.Module):
         Returns:
             Float tensor in [-1, 1], shape (B, 3, H, W).
         """
-        # Convert to fp16 if needed
-        if self.use_fp16 and z.dtype != torch.float16:
-            z = z.to(dtype=torch.float16)
-
-        # Scale back
-        z = z / self.scale_factor
-
-        # Direct decoder access (bypass .decode() overhead)
-        decoded = self.vae.decoder(z)
-
-        return decoded
+        dtype = torch.float16 if self.use_fp16 else z.dtype
+        z = z.to(dtype=dtype) / self.scale_factor
+        return self.vae.decode(z).sample
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Encode → Decode round-trip (useful for sanity-checking only)."""
@@ -665,7 +644,26 @@ class DDPMScheduler:
         SNR(t) = ᾱ_t / (1 − ᾱ_t).  Useful for Min-SNR loss weighting.
         """
         acp = self.alphas_cumprod.to(t.device)[t]
-        return acp / (1.0 - acp)
+        return acp / torch.clamp(1.0 - acp, min=1e-6)
+
+    def get_velocity(self, x_0: torch.Tensor, noise: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the velocity target for v-prediction (Salimans & Ho, 2022).
+        v = √ᾱ_t · ε − √(1−ᾱ_t) · x_0
+        """
+        device = x_0.device
+        sqrt_alpha = self.sqrt_alphas_cumprod.to(device)[t].reshape(-1, 1, 1, 1)
+        sqrt_sigma = self.sqrt_one_minus_alphas_cumprod.to(device)[t].reshape(-1, 1, 1, 1)
+        return sqrt_alpha * noise - sqrt_sigma * x_0
+
+    def to(self, device):
+        """Move all schedule tensors to *device* for zero-copy indexing."""
+        self.betas                         = self.betas.to(device)
+        self.alphas                        = self.alphas.to(device)
+        self.alphas_cumprod                = self.alphas_cumprod.to(device)
+        self.sqrt_alphas_cumprod           = self.sqrt_alphas_cumprod.to(device)
+        self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(device)
+        return self
 
 
 class DDIMScheduler:
@@ -769,6 +767,13 @@ class DDIMScheduler:
             x_prev = x_prev + sigma_t * torch.randn_like(x_t)
 
         return x_prev
+
+    def to(self, device):
+        """Move schedule tensors to *device*."""
+        self.alphas_cumprod = self.alphas_cumprod.to(device)
+        if self.timesteps is not None:
+            self.timesteps = self.timesteps.to(device)
+        return self
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

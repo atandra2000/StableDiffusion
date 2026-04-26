@@ -2,9 +2,9 @@
 
 A full-stack implementation of Stable Diffusion trained on LAION-2B-en-aesthetic, built entirely from scratch in PyTorch. The model implements the complete latent diffusion pipeline — from raw image data through VAE encoding, CLIP text conditioning, and a custom UNet denoising model — without relying on any high-level diffusion library.
 
-**Hardware:** 2× RTX PRO 4500 (32 GB VRAM each) on RunPod
+**Hardware:** 2× RTX 5090 (Blackwell, cc 10.x, 32 GB VRAM each) on RunPod
 **Dataset:** LAION-2B-en-aesthetic, filtered to ~12M high-quality images
-**Status:** Currently in the VAE latent encoding stage
+**Status:** Training in progress — Epoch 21 complete (checkpoints at 10, 14, 17, 21)
 
 ![Architecture Overview](assets/architecture_overview.png)
 
@@ -82,8 +82,10 @@ IMAGE              │
 | **DDIM inference** | 30 deterministic steps | Same quality as 1000-step DDPM, 33× faster |
 | **EMA** | decay=0.9999, warmup-corrected | Smoother weights → better generation quality |
 | **Latent pre-encoding** | Encode all images once, cache to RAM | Eliminates VAE from training loop entirely |
-| **bfloat16 + torch.compile** | `mode="reduce-overhead"` on UNet | ~30% throughput improvement on Ampere+ |
-| **DataParallel** | `nn.DataParallel` across 2 GPUs | Simple multi-GPU with minimal code overhead |
+| **bfloat16 + torch.compile** | `mode="max-autotune"` on UNet | Best throughput on Blackwell (no GradScaler needed) |
+| **DistributedDataParallel** | DDP + NCCL backend, `torchrun` launcher | True process-per-GPU parallelism; faster than DataParallel |
+| **Min-SNR loss weighting** | γ=5, weight = min(SNR, γ)/SNR | Balances training signal across easy/hard timesteps |
+| **EMA on GPU** | decay=0.9999, maintained on GPU | Eliminates CPU↔GPU copies; warmup-corrected |
 | **Classifier-free guidance** | scale=7.5, concat uncond+cond | 2× UNet forward per step; strong prompt adherence |
 
 ---
@@ -240,12 +242,12 @@ python data_pipeline/05_build_hf_dataset.py
 # 3. Encode latents to disk (dual-GPU)
 python src/encode_pipeline.py
 
-# 4. Train (loads latents into RAM first)
-python src/train.py \
+# 4. Train with DDP (2 GPUs)
+torchrun --nproc_per_node=2 src/train.py \
     --cache_path /workspace/StableDiffusion/laion_hf_dataset \
     --latent_dir /workspace/StableDiffusion/laion_latents \
-    --epochs 10 \
-    --batch_size 128 \
+    --epochs 30 \
+    --batch_size 24 \
     --grad_accum 2 \
     --lr 1e-4 \
     --use_wandb
@@ -254,7 +256,7 @@ python src/train.py \
 ### Resume Training
 
 ```bash
-python src/train.py \
+torchrun --nproc_per_node=2 src/train.py \
     --cache_path /workspace/StableDiffusion/laion_hf_dataset \
     --latent_dir /workspace/StableDiffusion/laion_latents \
     --resume /workspace/checkpoints/sd_latest.pt
@@ -324,10 +326,11 @@ image = vae.decode(latents)   # (1, 3, 512, 512) in [-1, 1]
 | Weight decay | 1e-2 | |
 | LR warmup | 500 steps | Linear 1e-6 → 1e-4 |
 | LR decay | CosineAnnealing | eta_min = lr × 1e-2 |
-| Batch size (effective) | 512 | 128/GPU × 2 GPUs × 2 accum |
-| EMA decay | 0.9999 | Warmup-corrected |
-| Precision | bfloat16 | Ampere native |
-| Compilation | `torch.compile` | `reduce-overhead` mode |
+| Batch size (effective) | 96 | 24/GPU × 2 GPUs × 2 accum |
+| EMA decay | 0.9999 | Warmup-corrected, maintained on GPU |
+| Precision | bfloat16 | Blackwell native (no GradScaler) |
+| Compilation | `torch.compile` | `max-autotune` mode |
+| Min-SNR γ | 5 | Loss weighting by Hang et al. (2023) |
 | Grad norm clip | 1.0 | Prevents gradient explosion |
 
 ---
@@ -360,6 +363,21 @@ StableDiffusion/
 
 ---
 
+## Checkpoints
+
+Checkpoints are stored on Google Drive (each ~11.6 GB):
+
+| Epoch | Google Drive |
+|-------|-------------|
+| 10    | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
+| 14    | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
+| 17    | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
+| 21    | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
+
+Each checkpoint contains: `unet_state_dict`, `ema_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`, `epoch`, `global_step`, `loss`.
+
+---
+
 ## References
 
 - **LDM**: Rombach et al. (2022). *High-Resolution Image Synthesis with Latent Diffusion Models*. CVPR.
@@ -368,3 +386,4 @@ StableDiffusion/
 - **CFG**: Ho & Salimans (2021). *Classifier-Free Diffusion Guidance*.
 - **CLIP**: Radford et al. (2021). *Learning Transferable Visual Models from Natural Language Supervision*. ICML.
 - **LAION**: Schuhmann et al. (2022). *LAION-5B: An Open Large-Scale Dataset for Training Next Generation Image-Text Models*. NeurIPS.
+- **Min-SNR**: Hang et al. (2023). *Efficient Diffusion Training via Min-SNR Weighting Strategy*. ICCV.

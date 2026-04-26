@@ -1,6 +1,7 @@
 """
 Training configuration for Stable Diffusion on LAION-2B-en-aesthetic.
-Hardware: 2x RTX PRO 4500 (32 GB VRAM each) on RunPod.
+Hardware: 2× RTX 5090 (Blackwell, cc 10.x, 32 GB VRAM each) on RunPod.
+Multi-GPU: DistributedDataParallel (DDP) via torchrun --nproc_per_node=2.
 """
 
 from dataclasses import dataclass, field
@@ -71,14 +72,14 @@ class SchedulerConfig:
 
 @dataclass
 class TrainingConfig:
-    # Hardware
+    # Hardware (2× RTX 5090, DDP via torchrun)
     num_gpus:    int = 2
     vram_per_gpu: str = "32GB"
 
     # Batch
-    batch_size_per_gpu: int = 128
+    batch_size_per_gpu: int = 24
     grad_accum:         int = 2
-    # Effective batch = 128 × 2 GPUs × 2 accum = 512
+    # Effective batch = 24 × 2 GPUs × 2 accum = 96
 
     # Optimiser
     lr:            float = 1e-4
@@ -97,9 +98,10 @@ class TrainingConfig:
     save_every:    int = 1
     val_every:     int = 2
 
-    # Precision / compilation
+    # Precision / compilation (Blackwell: no GradScaler, max-autotune compile)
     dtype:         str  = "bfloat16"
     use_compile:   bool = True
+    compile_mode:  str  = "max-autotune"
     grad_ckpt:     bool = False     # Enable if VRAM is tight
 
     # Paths
