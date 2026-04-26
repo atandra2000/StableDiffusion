@@ -29,9 +29,11 @@ laion_*/
 wandb/
 training.log
 
-# Generated images
+# Generated images (exclude training validation grids, keep curated samples)
 val_epoch_*.png
 results/*.png
+!results/samples/
+!results/samples/*.png
 !assets/*.png
 
 # Jupyter

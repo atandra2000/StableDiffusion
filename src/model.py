@@ -84,7 +84,8 @@ class PretrainedVAE(nn.Module):
             Scaled latents (B, 4, H//8, W//8).
         """
         dtype = torch.float16 if self.use_fp16 else x.dtype
-        mean = self.vae.encode(x.to(dtype=dtype)).latent_dist.mean
+        posterior = self.vae.encode(x.to(dtype=dtype)).latent_dist
+        mean = posterior.mean if hasattr(posterior, "mean") else posterior.sample()
         return mean * self.scale_factor
 
     @torch.no_grad()
