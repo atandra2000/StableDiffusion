@@ -3,8 +3,9 @@
 A full-stack implementation of Stable Diffusion trained on LAION-2B-en-aesthetic, built entirely from scratch in PyTorch. The model implements the complete latent diffusion pipeline — from raw image data through VAE encoding, CLIP text conditioning, and a custom UNet denoising model — without relying on any high-level diffusion library.
 
 **Hardware:** 2× RTX 5090 (Blackwell, cc 10.x, 32 GB VRAM each) on RunPod
-**Dataset:** LAION-2B-en-aesthetic, filtered to ~12M high-quality images
-**Status:** Training in progress — Epoch 21 complete (checkpoints at 10, 14, 17, 21)
+**Dataset:** LAION-2B-en-aesthetic (~12M images pre-training) + curated fine-tuning subset
+**Status:** Training complete — 21 epochs, 181K steps, best loss 0.0924
+**W&B:** [atandrabharati-self/stable-diffusion](https://wandb.ai/atandrabharati-self/stable-diffusion)
 
 ![Architecture Overview](assets/architecture_overview.png)
 
@@ -224,6 +225,23 @@ At training time, `load_latent_cache()` loads all ~12M latent tensors into RAM i
 
 ## Training
 
+### Two-Phase Training Strategy
+
+Training was split into two phases to maximise both generality and quality:
+
+| | Phase 1 — Pre-training | Phase 2 — Fine-tuning |
+|---|---|---|
+| **Epochs** | 1 – 10 | 11 – 21 |
+| **Steps** | 0 – 136K | 136K – 181K |
+| **Dataset** | Full LAION-2B-en-aesthetic (~12M) | Curated high-quality subset |
+| **LR** | 1e-4 → 1e-5 | 3e-6 → 8e-6 |
+| **End loss** | 0.1247 | 0.0947 (best) / 0.1030 (final) |
+| **Min-SNR γ** | 5 → 2.5 | 2 – 5 |
+| **cfg_dropout** | 0 → 0.05 | 0.05 – 0.10 |
+
+Full loss curve data (2,450 points): [`results/loss_curve.csv`](results/loss_curve.csv)
+Full training log: [`results/training_status.md`](results/training_status.md)
+
 ### Quickstart (RunPod)
 
 ```bash
@@ -330,7 +348,10 @@ image = vae.decode(latents)   # (1, 3, 512, 512) in [-1, 1]
 | EMA decay | 0.9999 | Warmup-corrected, maintained on GPU |
 | Precision | bfloat16 | Blackwell native (no GradScaler) |
 | Compilation | `torch.compile` | `max-autotune` mode |
-| Min-SNR γ | 5 | Loss weighting by Hang et al. (2023) |
+| Min-SNR γ | 5 → 2.5 (pretrain) / 2–5 (FT) | Loss weighting by Hang et al. (2023) |
+| cfg_dropout | 0.05–0.10 (FT phase) | Random caption drop for CFG training |
+| Total steps | 181,177 | Pre-train 136K + Fine-tune 45K |
+| Best loss | 0.0924 | Epoch ~16, fine-tuning phase |
 | Grad norm clip | 1.0 | Prevents gradient explosion |
 
 ---
@@ -365,16 +386,16 @@ StableDiffusion/
 
 ## Checkpoints
 
-Checkpoints are stored on Google Drive (each ~11.6 GB):
+Checkpoints are stored on Google Drive (~11.6 GB each):
 
-| Epoch | Google Drive |
-|-------|-------------|
-| 10    | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
-| 14    | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
-| 17    | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
-| 21    | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
+| Epoch | Phase | Global Step | Loss | Drive |
+|-------|-------|-------------|------|-------|
+| 10 | Pre-training end | 136,279 | 0.1247 | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
+| 14 | Fine-tuning | 145,282 | 0.1257 | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
+| 17 | Fine-tuning | 151,818 | 0.1083 | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
+| 21 | Fine-tuning end | 181,177 | 0.1030 | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
 
-Each checkpoint contains: `unet_state_dict`, `ema_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`, `epoch`, `global_step`, `loss`.
+Each checkpoint contains: `unet_state_dict`, `ema_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`, `epoch`, `global_step`, `best_loss`.
 
 ---
 
