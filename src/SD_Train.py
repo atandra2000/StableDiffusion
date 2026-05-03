@@ -79,7 +79,7 @@ torch.set_float32_matmul_precision("high")
 # Blackwell supports Flash SDP natively — enable all fast paths
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
-torch.backends.cuda.enable_math_sdp(True)
+torch.backends.cuda.enable_math_sdp(False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -330,6 +330,7 @@ def train_epoch(
     optimizer.zero_grad(set_to_none=True)
 
     total_loss, step_count, accum_loss = 0.0, 0, 0.0
+    last_step_ckpt = 0
     pbar = tqdm(loader, desc=f"Epoch {epoch}", leave=True, dynamic_ncols=True) if is_main_process() else loader
 
     for step, batch in enumerate(pbar):
@@ -374,9 +375,25 @@ def train_epoch(
                 accum_loss = 0.0
                 global_step += 1
 
-                if save_steps > 0 and global_step % save_steps == 0 and is_main_process():
-                    _save_step_checkpoint(model, optimizer, lr_scheduler, ema,
-                                         epoch, global_step, best_loss, ckpt_dir)
+                if save_steps > 0 and is_main_process() and (global_step - last_step_ckpt) >= save_steps:
+                    _cdir = Path(ckpt_dir).expanduser()
+                    _cdir.mkdir(parents=True, exist_ok=True)
+                    _avg = total_loss / max(step_count, 1)
+                    _best = min(best_loss, _avg)
+                    _ckpt = {
+                        "epoch": epoch, "global_step": global_step, "best_loss": _best,
+                        "unet_state_dict": _strip_state_dict_prefixes(_unwrap_module(model.unet).state_dict()),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+                        "ema_state_dict": ema.state_dict(),
+                    }
+                    _tmp = _cdir / f".sd_step_{global_step:07d}.tmp"
+                    _out = _cdir / f"sd_step_{global_step:07d}.pt"
+                    torch.save(_ckpt, _tmp)
+                    os.replace(_tmp, _out)
+                    torch.save(_ckpt, _cdir / "sd_latest.pt")
+                    logger.info(f"Step checkpoint saved: {_out}")
+                    last_step_ckpt = global_step
 
             if is_main_process() and step_count > 0:
                 pbar.set_postfix(loss=f"{total_loss/step_count:.4f}",
@@ -411,10 +428,10 @@ def train_epoch(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 FIXED_VAL_PROMPTS = [
-    "epic mountain landscape at golden hour, photorealistic, detailed, 8k",
-    "portrait of a young woman, soft lighting, detailed face, photorealistic",
-    "cyberpunk city street at night, neon lights, rain reflections, cinematic",
-    "beautiful flower meadow, sunlight, sharp focus, nature photography",
+    "a beautiful sunset over mountain peaks",
+    "a photorealistic portrait of a woman with blue eyes",
+    "a dog playing in a field of flowers",
+    "a futuristic city skyline at night with neon lights",
 ]
 
 @torch.no_grad()
@@ -465,26 +482,6 @@ def validate(model, ema, tokenizer, device, epoch, output_dir,
 # ═══════════════════════════════════════════════════════════════════════════════
 # CHECKPOINT
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def _save_step_checkpoint(model, optimizer, lr_scheduler, ema,
-                          epoch, global_step, best_loss, ckpt_dir):
-    ckpt_dir = Path(ckpt_dir).expanduser()
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    unet_raw = _unwrap_module(model.unet)
-    ckpt = {
-        "epoch":                   epoch,
-        "global_step":             global_step,
-        "best_loss":               best_loss,
-        "unet_state_dict":         _strip_state_dict_prefixes(unet_raw.state_dict()),
-        "optimizer_state_dict":    optimizer.state_dict(),
-        "lr_scheduler_state_dict": lr_scheduler.state_dict(),
-        "ema_state_dict":          ema.state_dict(),
-    }
-    path = ckpt_dir / f"sd_step_{global_step:07d}.pt"
-    torch.save(ckpt, path)
-    torch.save(ckpt, ckpt_dir / "sd_latest.pt")
-    logger.info(f"Step checkpoint saved: {path}")
-
 
 def save_checkpoint(model, optimizer, lr_scheduler, ema,
                     epoch, global_step, best_loss, ckpt_dir):
@@ -537,16 +534,12 @@ def load_checkpoint(model, optimizer, lr_scheduler, ema, ckpt_path, device="cuda
         logger.warning(f"UNet key mismatches — missing: {len(missing.missing_keys)}, unexpected: {len(missing.unexpected_keys)}")
 
     # Restore optimizer, scheduler, EMA — log but don't crash on mismatch
-    for key, obj, label in [
-        ("optimizer_state_dict", optimizer, "optimizer"),
-        ("lr_scheduler_state_dict", lr_scheduler, "scheduler"),
-        ("ema_state_dict", ema, "EMA"),
-    ]:
+    for key, obj, label in [("optimizer_state_dict", optimizer, "optimizer"),
+                             ("lr_scheduler_state_dict", lr_scheduler, "scheduler"),
+                             ("ema_state_dict", ema, "EMA")]:
         if key in ckpt:
-            try:
-                obj.load_state_dict(ckpt[key])
-            except Exception as e:
-                logger.warning(f"Could not load {label}: {e}")
+            try: obj.load_state_dict(ckpt[key])
+            except Exception as e: logger.warning(f"Could not load {label}: {e}")
 
     start_epoch = ckpt.get("epoch", 0) + 1
     global_step = ckpt.get("global_step", 0)
@@ -564,8 +557,7 @@ def main(rank, world_size, args):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     setup_ddp(rank, world_size)
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.empty_cache()
-    gc.collect()
+    torch.cuda.empty_cache(); gc.collect()
 
     if is_main_process():
         logger.info("=" * 70)
@@ -753,8 +745,8 @@ if __name__ == "__main__":
     parser.add_argument("--cfg_dropout",   type=float,           default=0.05, help="CFG dropout probability.")
 
     # Checkpointing
-    parser.add_argument("--save_every",  type=int, default=1)
-    parser.add_argument("--save_steps",  type=int, default=0, help="Save a mid-epoch checkpoint every N global steps (0 = disabled).")
+    parser.add_argument("--save_every",  type=int, default=1,  help="Save checkpoint every N epochs.")
+    parser.add_argument("--save_steps",  type=int, default=0, help="Save checkpoint every N global steps (0=disabled).")
     parser.add_argument("--val_every",   type=int, default=1)
     parser.add_argument("--ckpt_dir",    type=str, default="checkpoints")
     parser.add_argument("--output_dir",  type=str, default="outputs")

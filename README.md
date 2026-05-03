@@ -4,7 +4,7 @@ A full-stack implementation of Stable Diffusion trained on LAION-2B-en-aesthetic
 
 **Hardware:** 2× RTX 5090 (Blackwell, cc 10.x, 32 GB VRAM each) on RunPod
 **Dataset:** LAION-2B-en-aesthetic (~12M images pre-training) + curated fine-tuning subset
-**Status:** Training complete — 21 epochs, 181K steps, best loss 0.0924
+**Status:** Training ongoing — 42 epochs, 232K steps, best loss 0.0947 (epoch 16)
 **W&B:** [atandrabharati-self/stable-diffusion](https://wandb.ai/atandrabharati-self/stable-diffusion)
 
 ![Architecture Overview](assets/architecture_overview.png)
@@ -231,21 +231,25 @@ At training time, `load_latent_cache()` loads all ~12M latent tensors into RAM i
 
 ## Training
 
-### Two-Phase Training Strategy
+### Training History
 
-Training was split into two phases to maximise both generality and quality:
+| | Phase 1 — Pre-training | Phase 2a — LAION Fine-tuning | Phase 2b — DiffusionDB/JourneyDB | Phase 2c — Extended FT |
+|---|---|---|---|---|
+| **Epochs** | 1 – 10 | 11 – 17 | 18 – 21 | 22 – 42 |
+| **Steps** | 0 – 136K | 136K – 152K | 152K – 181K | 181K – 232K |
+| **Dataset** | LAION-2B-en-aesthetic (~12M images) | 212K filtered LAION subset | 705K DiffusionDB + JourneyDB | Filtered FT dataset |
+| **LR** | 1e-4 → 1e-5 | 3e-6 | 3e-6 → 8e-6 | 2e-6 → 1e-6 |
+| **End loss** | 0.1247 | **0.0947 (best)** | 0.1030 | 0.1212 |
+| **Min-SNR γ** | 5 | 5 | 5 → 3.0 | 2 – 5 |
+| **cfg_dropout** | 0 → 0.05 | 0.05 | 0.05 – 0.10 | 0.05 |
 
-| | Phase 1 — Pre-training | Phase 2 — Fine-tuning |
-|---|---|---|
-| **Epochs** | 1 – 10 | 11 – 21 |
-| **Steps** | 0 – 136K | 136K – 181K |
-| **Dataset** | Full LAION-2B-en-aesthetic (~12M) | Curated high-quality subset |
-| **LR** | 1e-4 → 1e-5 | 3e-6 → 8e-6 |
-| **End loss** | 0.1247 | 0.0947 (best) / 0.1030 (final) |
-| **Min-SNR γ** | 5 → 2.5 | 2 – 5 |
-| **cfg_dropout** | 0 → 0.05 | 0.05 – 0.10 |
+**Recommended checkpoint: `sd_epoch_017.pt`** (step 151,836, loss 0.0947).
 
-Full loss curve data (2,450 points): [`results/loss_curve.csv`](results/loss_curve.csv)
+Epochs 18–21 fine-tuned on 705K DiffusionDB/JourneyDB images. LR was raised to 8e-6 in epochs 19–21 which proved too aggressive — **mode collapse** caused the model to output faces for all prompts. Epoch 17 is the clean working baseline.
+
+Phase 2c (epochs 22–42) resumes from epoch 17 with lr=2e-6, warmup 1000 steps, and a filtered dataset with 223K face/human prompts removed via `06_filter_dataset.py`. Training is ongoing.
+
+Full loss curve data (3,493 points): [`results/loss_curve.csv`](results/loss_curve.csv)
 Full training log: [`results/training_status.md`](results/training_status.md)
 
 ### Quickstart (RunPod)
@@ -256,18 +260,19 @@ git clone https://github.com/atandra2000/StableDiffusion
 cd StableDiffusion
 pip install -r requirements.txt
 
-# 2. Run data pipeline (Steps 01–05)
+# 2. Run data pipeline (Steps 01–06)
 python data_pipeline/01_download_metadata.py
 python data_pipeline/02_filter_metadata.py
 python data_pipeline/03_download_images.py
 python data_pipeline/04_preprocess_to_cache.py
 python data_pipeline/05_build_hf_dataset.py
+python data_pipeline/06_filter_dataset.py   # optional: for FT filtered set
 
 # 3. Encode latents to disk (dual-GPU)
 python src/encode_pipeline.py
 
-# 4. Train with DDP (2 GPUs)
-torchrun --nproc_per_node=2 src/train.py \
+# 4. Train with DDP (2× RTX 5090)
+torchrun --nproc_per_node=2 src/SD_Train.py \
     --cache_path /workspace/StableDiffusion/laion_hf_dataset \
     --latent_dir /workspace/StableDiffusion/laion_latents \
     --epochs 30 \
@@ -275,6 +280,12 @@ torchrun --nproc_per_node=2 src/train.py \
     --grad_accum 2 \
     --lr 1e-4 \
     --use_wandb
+
+# 5. Generate images (CUDA)
+python src/SD_ImageGen.py \
+    --checkpoint checkpoints/sd_latest.pt \
+    --prompts "a photorealistic sunset over mountain peaks" \
+    --steps 50 --guidance 7.5 --seed 42 --output output.png
 ```
 
 ### Resume Training
@@ -285,6 +296,29 @@ torchrun --nproc_per_node=2 src/train.py \
     --latent_dir /workspace/StableDiffusion/laion_latents \
     --resume /workspace/checkpoints/sd_latest.pt
 ```
+
+### Mid-Epoch Checkpointing (for interruptible pods)
+
+```bash
+torchrun --nproc_per_node=2 src/train.py \
+    --cache_path /workspace/StableDiffusion/hf_dataset_filtered/train \
+    --latent_dir /workspace/StableDiffusion/latents_filtered/latents \
+    --epochs      22 \
+    --batch_size  24 \
+    --grad_accum  2 \
+    --lr          2e-6 \
+    --warmup_steps 1000 \
+    --cfg_dropout  0.05 \
+    --min_snr \
+    --min_snr_gamma 5.0 \
+    --grad_ckpt \
+    --save_steps  1000 \
+    --ckpt_dir    /workspace/StableDiffusion/phase1_v2_checkpoints \
+    --resume      /workspace/StableDiffusion/checkpoints/sd_epoch_017.pt \
+    --use_wandb
+```
+
+`--save_steps 1000` saves `sd_step_XXXXXXX.pt` + overwrites `sd_latest.pt` every 1000 global steps. If the pod is killed, resume from `sd_latest.pt` to continue mid-epoch from the last save point.
 
 ### Generate with Trained Checkpoint
 
@@ -356,8 +390,8 @@ image = vae.decode(latents)   # (1, 3, 512, 512) in [-1, 1]
 | Compilation | `torch.compile` | `max-autotune` mode |
 | Min-SNR γ | 5 → 2.5 (pretrain) / 2–5 (FT) | Loss weighting by Hang et al. (2023) |
 | cfg_dropout | 0.05–0.10 (FT phase) | Random caption drop for CFG training |
-| Total steps | 181,177 | Pre-train 136K + Fine-tune 45K |
-| Best loss | 0.0924 | Epoch ~16, fine-tuning phase |
+| Total steps | 232,235 | Pre-train 136K + Fine-tune 96K (ongoing) |
+| Best loss | 0.0947 | Epoch 16, step 149,718 |
 | Grad norm clip | 1.0 | Prevents gradient explosion |
 
 ---
@@ -367,36 +401,43 @@ image = vae.decode(latents)   # (1, 3, 512, 512) in [-1, 1]
 ```
 StableDiffusion/
 ├── src/
-│   ├── model.py              # Full model: VAE wrapper, CLIP encoder, UNet, schedulers
-│   ├── train.py              # DDP training loop, Min-SNR loss, EMA, DDIM validation
-│   ├── generate.py           # GPU inference CLI: DDIM + CFG, grid output, EMA weights
-│   ├── inference.py          # Apple Silicon / MPS inference (for local generation)
-│   ├── encode_pipeline.py    # Dual-GPU VAE latent encoding (original)
+│   ├── SD_Model.py           # Production model: VAE (fp16), CLIP, UNet, DDPM/DDIM schedulers
+│   ├── SD_Model_v2.py        # Next-gen MM-DiT + dual CLIP + Rectified Flow (SD3-style)
+│   ├── SD_Model_scratch.py   # Educational scratch implementation
+│   ├── SD_Train.py           # DDP training loop for 2× RTX 5090, Min-SNR, EMA, BF16
+│   ├── SD_Train_v2.py        # MM-DiT training (velocity prediction, logit-normal timesteps)
+│   ├── SD_ImageGen.py        # GPU inference: DDIM + CFG, negative prompts, grid output
+│   ├── model.py              # Core model (earlier iteration)
+│   ├── train.py              # Earlier training loop
+│   ├── generate.py           # GPU inference CLI
+│   ├── inference.py          # Apple Silicon / MPS inference (local generation)
+│   ├── encode_pipeline.py    # Dual-GPU VAE latent encoding
 │   └── encode_latents.py     # 3-stage pipeline encoder: shard prefetch + DMA + bfloat16
 ├── data_pipeline/
-│   ├── 01_download_metadata.py      # Download LAION-2B-en-aesthetic parquets
-│   ├── 01b_download_diffusiondb.py  # Download DiffusionDB (FT dataset)
+│   ├── 01_download_metadata.py         # Download LAION-2B-en-aesthetic parquets
+│   ├── 01b_download_diffusiondb.py     # Download DiffusionDB (FT dataset)
 │   ├── 01c_download_journeydb_images.py # Download JourneyDB subset (FT dataset)
-│   ├── 02_filter_metadata.py        # Quality filtering (aesthetic, CLIP, resolution)
-│   ├── 03_download_images.py        # img2dataset parallel image download
-│   ├── 04_preprocess_to_cache.py    # Tokenize captions, build hybrid cache
-│   └── 05_build_hf_dataset.py       # Merge into HuggingFace Dataset
+│   ├── 02_filter_metadata.py           # Quality filtering (aesthetic, CLIP, resolution)
+│   ├── 03_build_hf_dataset.py          # Hybrid HF Dataset build from parquet batches
+│   ├── 03_download_images.py           # img2dataset parallel image download
+│   ├── 04_preprocess_to_cache.py       # Tokenize captions, build hybrid cache
+│   ├── 05_build_hf_dataset.py          # Merge into HuggingFace Dataset (train/val split)
+│   └── 06_filter_dataset.py            # Remove celebrities/NSFW; hardlink filtered latents
 ├── configs/
 │   └── config.py             # All hyperparameters in typed dataclasses
 ├── assets/
 │   ├── generate_plots.py     # Architecture overview chart
 │   └── architecture_overview.png
 ├── results/
-│   ├── training_status.md    # Full training log: pre-training + fine-tuning
-│   ├── loss_curve.csv        # 2,450-point loss history across 181K steps
-│   └── samples/              # Generated images from checkpoint epoch 17–21
-│       ├── cinematic.png
-│       ├── city.png
-│       ├── custom.png
-│       ├── forest.png
-│       ├── landscape.png
-│       ├── man.png
-│       └── portrait.png
+│   ├── training_status.md    # Full training log: pre-training + fine-tuning (ep 1–42)
+│   ├── loss_curve.csv        # 3,493-point loss history across 232K steps
+│   └── samples/              # Generated images from various checkpoints
+│       ├── car.png, city.png, city_42.png, forest.png, forest_42.png
+│       ├── fullbody.png, fullbody_2.png, fullbody_42.png
+│       ├── landscape.png, landscape_42.png
+│       ├── man.png, portrait.png, portrait_42.png
+│       ├── portrait_centered.png, portrait_centered_2.png, portrait_centered_3.png
+│       └── portrait_highcfg.png, cinematic.png, custom.png
 ├── .github/workflows/
 │   └── ci.yml                # Lint + UNet forward pass smoke test
 └── requirements.txt
@@ -425,15 +466,22 @@ python3 src/inference.py \
     --steps 100 --guidance 7.5 --seed 42 --output results/samples/man.png
 ```
 
-| Image | Prompt |
-|-------|--------|
-| ![custom](results/samples/custom.png) | "a racing car cruising through forest roads" |
-| ![cinematic](results/samples/cinematic.png) | "a man very happy lying down on the beach, cinematic and photorealistic" |
-| ![man](results/samples/man.png) | "a man climbing mountain" |
-| ![city](results/samples/city.png) | city |
-| ![forest](results/samples/forest.png) | forest |
-| ![landscape](results/samples/landscape.png) | landscape |
-| ![portrait](results/samples/portrait.png) | portrait |
+| Image | Prompt | Checkpoint |
+|-------|--------|------------|
+| ![custom](results/samples/custom.png) | "a racing car cruising through forest roads" | ep 17 |
+| ![cinematic](results/samples/cinematic.png) | "a man very happy lying down on the beach, cinematic and photorealistic" | ep 17 |
+| ![man](results/samples/man.png) | "a man climbing mountain" | ep 17 |
+| ![city](results/samples/city.png) | city | ep 17 |
+| ![forest](results/samples/forest.png) | forest | ep 17 |
+| ![landscape](results/samples/landscape.png) | landscape | ep 17 |
+| ![portrait](results/samples/portrait.png) | portrait | ep 17 |
+| ![car](results/samples/car.png) | "a racing car cruising through forest roads" | ep 42 |
+| ![portrait_highcfg](results/samples/portrait_highcfg.png) | portrait (high CFG) | ep 42 |
+| ![portrait_centered](results/samples/portrait_centered.png) | portrait centered | ep 42 |
+| ![fullbody](results/samples/fullbody.png) | full body portrait | ep 42 |
+| ![city_42](results/samples/city_42.png) | city | ep 42 |
+| ![forest_42](results/samples/forest_42.png) | forest | ep 42 |
+| ![landscape_42](results/samples/landscape_42.png) | landscape | ep 42 |
 
 ---
 
@@ -441,12 +489,13 @@ python3 src/inference.py \
 
 Checkpoints are stored on Google Drive (~11.6 GB each):
 
-| Epoch | Phase | Global Step | Loss | Drive |
-|-------|-------|-------------|------|-------|
-| 10 | Pre-training end | 136,279 | 0.1247 | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
-| 14 | Fine-tuning | 145,282 | 0.1257 | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
-| 17 | Fine-tuning | 151,818 | 0.1083 | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
-| 21 | Fine-tuning end | 181,177 | 0.1030 | [Drive folder](https://drive.google.com/drive/folders/1_BFLxvZHLaU9HZhZmQXEHGtCPBw6KRoa) |
+| Epoch | Phase | Global Step | Loss | Notes | Drive |
+|-------|-------|-------------|------|-------|-------|
+| 10 | Pre-training end | 136,279 | 0.1247 | | [Drive folder](https://drive.google.com/drive/folders/1EJdiLwaE6iMGksj9mr_CZkUF7RlXO9Wp) |
+| 14 | LAION fine-tuning | 145,282 | 0.1257 | | [Drive folder](https://drive.google.com/drive/folders/1EJdiLwaE6iMGksj9mr_CZkUF7RlXO9Wp) |
+| **17** | **LAION fine-tuning** | **151,818** | **0.0947** | **✅ Recommended for inference** | [Drive folder](https://drive.google.com/drive/folders/1EJdiLwaE6iMGksj9mr_CZkUF7RlXO9Wp) |
+| 21 | DiffusionDB/JourneyDB | 181,177 | 0.1030 | ⚠️ Mode collapse — avoid for inference | [Drive folder](https://drive.google.com/drive/folders/1EJdiLwaE6iMGksj9mr_CZkUF7RlXO9Wp) |
+| 42 | Extended fine-tuning | 232,235 | 0.1212 | Phase 2c — filtered dataset | [Drive folder](https://drive.google.com/drive/folders/1EJdiLwaE6iMGksj9mr_CZkUF7RlXO9Wp) |
 
 Each checkpoint contains: `unet_state_dict`, `ema_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`, `epoch`, `global_step`, `best_loss`.
 

@@ -10,7 +10,7 @@ Each float16 latent (4, 64, 64) is 32 KB.  One `.npy` file is written per
 image directly to OUT_DIR:
 
     Storage = N_images × 32 KB
-    1.5 M images → ~48 GB
+    1.5 M images → ~48 GB 
 
 Resume scans OUT_DIR with os.listdir() — O(1) lookup, no file reads needed.
 
@@ -48,6 +48,7 @@ Usage
 """
 
 import argparse
+import io
 import logging
 import os
 import shutil
@@ -303,7 +304,7 @@ def main(args):
     logger.info("=" * 64)
 
     # ── Load VAE ───────────────────────────────────────────────────────────────
-    from model import PretrainedVAE
+    from SD_Model import PretrainedVAE
     vae = PretrainedVAE(model_id="stabilityai/sd-vae-ft-mse").to(device)
     vae.eval()
     # torch.compile ~20–30 % throughput gain after first-batch graph capture
