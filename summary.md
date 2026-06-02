@@ -269,7 +269,7 @@ SD_ImageGen.py                  → CUDA inference with proper negative-prompt s
 ├── sd-logs/                    # Captured `training.log` / `output*.log` runs
 ├── sd-test-imgs/               # Inference smoke tests
 ├── generated_images/           # Curated final renders (epoch 42)
-├── Training Screenshots/       # WandB / terminal screenshots + claude notes
+├── Training Screenshots/       # WandB / terminal screenshots
 ├── diffusion/                  # local venv (Python 3.12)
 ├── .vscode/                    # Pyright off, autoimport on
 └── __pycache__/                # cached SD_Model bytecode
