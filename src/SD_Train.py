@@ -324,6 +324,7 @@ def train_epoch(
     uncond_text_emb=None, use_wandb=False, use_min_snr=True,
     min_snr_gamma=5.0, cfg_dropout=0.0,
     save_steps=0, ckpt_dir="checkpoints", best_loss=float("inf"),
+    memory_format: str = "channels_last",
 ) -> tuple[float, int]:
     ddp_unet.train()
     model.text_encoder.eval()
@@ -338,7 +339,8 @@ def train_epoch(
             continue
         try:
             latents = batch["pixel_values"].to(device, dtype=torch.bfloat16, non_blocking=True)
-            latents = latents.contiguous(memory_format=torch.channels_last)
+            if memory_format == "channels_last":
+                latents = latents.contiguous(memory_format=torch.channels_last)
             ids  = batch["input_ids"].to(device, non_blocking=True)
             mask = batch["attention_mask"].to(device, non_blocking=True)
 
@@ -603,7 +605,8 @@ def main(rank, world_size, args):
 
     noise_scheduler = DDPMScheduler(steps=1000, beta_start=0.00085, beta_end=0.012, schedule="scaled_linear")
     model = StableDiffusionModel(vae, text_enc, unet, noise_scheduler).to(device)
-    model.unet = model.unet.to(memory_format=torch.channels_last)
+    if args.memory_format == "channels_last":
+        model.unet = model.unet.to(memory_format=torch.channels_last)
     noise_scheduler.to(device)
 
     # ── Dataset + unconditional embedding (precomputed once) ──────────────────
@@ -681,6 +684,7 @@ def main(rank, world_size, args):
             use_wandb=args.use_wandb, use_min_snr=args.min_snr, min_snr_gamma=args.min_snr_gamma,
             cfg_dropout=args.cfg_dropout,
             save_steps=args.save_steps, ckpt_dir=args.ckpt_dir, best_loss=best_loss,
+            memory_format=args.memory_format,
         )
 
         if avg_loss < best_loss:
@@ -720,7 +724,7 @@ if __name__ == "__main__":
 
     # Data
     parser.add_argument("--cache_path",   type=str,   default="laion_hf_dataset/train")
-    parser.add_argument("--latent_dir",   type=str,   default="laion_latents/laion_latents")
+    parser.add_argument("--latent_dir",   type=str,   default="laion_latents")
     parser.add_argument("--val_size",     type=int,   default=500)
 
     # Model
@@ -743,6 +747,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-min-snr",    dest="min_snr",       action="store_false")
     parser.add_argument("--min_snr_gamma", type=float,           default=5.0)
     parser.add_argument("--cfg_dropout",   type=float,           default=0.05, help="CFG dropout probability.")
+    parser.add_argument("--memory_format", type=str, default="channels_last",
+                        choices=("channels_last", "contiguous"),
+                        help="Memory format for UNet and latents. channels_last speeds up convs on NVIDIA GPUs. "
+                             "Use 'contiguous' for AMD or Apple Silicon.")
 
     # Checkpointing
     parser.add_argument("--save_every",  type=int, default=1,  help="Save checkpoint every N epochs.")

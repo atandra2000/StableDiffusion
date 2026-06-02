@@ -160,23 +160,29 @@ def load_model(checkpoint_path: str, device: torch.device):
 
 @torch.no_grad()
 def generate(
-    prompts:        list,
+    prompts:         list,
     vae,
     text_encoder,
     unet,
     tokenizer,
     scheduler,
-    device:         torch.device,
-    num_steps:      int   = 50,
-    guidance_scale: float = 7.5,
-    seed:           int   = 42,
-    height:         int   = 512,
-    width:          int   = 512,
+    device:          torch.device,
+    num_steps:       int   = 50,
+    guidance_scale:  float = 7.5,
+    seed:            int   = 42,
+    height:          int   = 512,
+    width:           int   = 512,
+    negative_prompts: list = None,
 ) -> list:
     assert height % 8 == 0 and width % 8 == 0
     batch_size = len(prompts)
     latent_h   = height // 8
     latent_w   = width  // 8
+
+    if negative_prompts is None:
+        negative_prompts = [""] * batch_size
+    elif len(negative_prompts) == 1 and batch_size > 1:
+        negative_prompts = negative_prompts * batch_size
 
     # Encode text
     def encode(texts):
@@ -188,7 +194,7 @@ def generate(
         return emb.float()
 
     cond_emb   = encode(prompts)
-    uncond_emb = encode([""] * batch_size)
+    uncond_emb = encode(negative_prompts)
     ctx = torch.cat([uncond_emb, cond_emb], dim=0)
 
     # Initial noise — generate on CPU then move (MPS generator workaround)
@@ -279,23 +285,22 @@ def main():
     all_images = []
     for i in range(0, len(prompts), args.batch_size):
         batch = prompts[i:i + args.batch_size]
-        # Apply negative prompt by replacing uncond with negative embedding
-        # (handled inside generate via the empty string default)
         print(f"Generating: {batch[0][:80]}")
         t0 = time.time()
         imgs = generate(
-            prompts        = batch,
-            vae            = vae,
-            text_encoder   = text_encoder,
-            unet           = unet,
-            tokenizer      = tokenizer,
-            scheduler      = scheduler,
-            device         = device,
-            num_steps      = args.steps,
-            guidance_scale = args.guidance,
-            seed           = args.seed + i,
-            height         = args.height,
-            width          = args.width,
+            prompts          = batch,
+            vae              = vae,
+            text_encoder     = text_encoder,
+            unet             = unet,
+            tokenizer        = tokenizer,
+            scheduler        = scheduler,
+            device           = device,
+            num_steps        = args.steps,
+            guidance_scale   = args.guidance,
+            seed             = args.seed + i,
+            height           = args.height,
+            width            = args.width,
+            negative_prompts = [args.negative] if args.negative else None,
         )
         elapsed = time.time() - t0
         print(f"  Done in {elapsed:.1f}s ({elapsed/args.steps:.2f}s/step)")

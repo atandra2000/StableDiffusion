@@ -682,12 +682,14 @@ class DDIMScheduler:
 
     def __init__(
         self,
-        steps:      int   = 1000,
-        beta_start: float = 0.00085,
-        beta_end:   float = 0.012,
-        schedule:   str   = "scaled_linear",
+        steps:           int   = 1000,
+        beta_start:      float = 0.00085,
+        beta_end:        float = 0.012,
+        schedule:        str   = "scaled_linear",
+        clamp_pred_x0:   bool  = False,
     ):
         self.num_train_timesteps = steps
+        self.clamp_pred_x0 = clamp_pred_x0
 
         if schedule == "scaled_linear":
             betas = torch.linspace(beta_start ** 0.5, beta_end ** 0.5, steps) ** 2
@@ -751,7 +753,8 @@ class DDIMScheduler:
 
         # Step 1: Estimate clean latent x̂_0 from noisy x_t
         pred_x0 = (x_t - (1.0 - alpha_t).sqrt() * noise_pred) / alpha_t.sqrt()
-        pred_x0 = pred_x0.clamp(-1.0, 1.0)  # prevent extreme values propagating
+        if self.clamp_pred_x0:
+            pred_x0 = pred_x0.clamp(-1.0, 1.0)  # prevent extreme values propagating
 
         # Step 2: Direction from x̂_0 towards x_t (diffusion "velocity")
         dir_xt = (1.0 - alpha_prev).sqrt() * noise_pred
