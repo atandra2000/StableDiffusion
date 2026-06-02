@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="docs/images/hero/collage.png" alt="SD-From-Scratch v1" width="100%">
+  <em>Sample outputs at epoch 42 — 232K steps on 2× RTX 5090</em>
+</p>
+
 # Stable Diffusion from Scratch
 
 [![GitHub](https://img.shields.io/badge/GitHub-atandra2000/StableDiffusion-181717?style=flat&logo=github)](https://github.com/atandra2000/StableDiffusion)
