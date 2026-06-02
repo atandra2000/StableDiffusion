@@ -82,7 +82,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> StableDiffusionMod
             ema = EMA(model.unet, decay=0.9999)
             ema.load_state_dict(ckpt["ema_state_dict"])
             # Apply EMA shadow weights to the model
-            ema.apply_shadow()
+            ema.apply_shadow(model.unet)
             logger.info(f"✅ EMA weights applied (step {ema.step_count}) — better image quality")
 
     elif "model_state_dict" in ckpt:

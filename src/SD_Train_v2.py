@@ -1485,7 +1485,7 @@ if __name__ == "__main__":
     # ── Data ──────────────────────────────────────────────────────────────────
     parser.add_argument("--cache_path",      type=str, default="laion_hf_dataset/train",
                         help="Path to HuggingFace dataset (Arrow format from 05_build_hf_dataset.py).")
-    parser.add_argument("--latent_dir",      type=str, default="laion_latents/laion_latents",
+    parser.add_argument("--latent_dir",      type=str, default="laion_latents",
                         help="Directory of pre-cached .npy latent files (v1 latents are reusable).")
     parser.add_argument("--val_size",        type=int, default=500)
     parser.add_argument("--latent_fraction", type=float, default=1.0,
