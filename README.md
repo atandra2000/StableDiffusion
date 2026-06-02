@@ -154,23 +154,37 @@ Full loss curves and per-epoch breakdown: [summary.md](summary.md)
 ### Loading from Python
 
 ```python
-import torch
-from src.model import UNetModel, DDIMScheduler
+import sys, torch
+sys.path.insert(0, "src")              # make src/ importable
+
 from huggingface_hub import hf_hub_download
+from SD_Model import UNetModel        # legacy single-file module
+# — or, equivalently, the refactored module: from model import UNetModel
 
 checkpoint = hf_hub_download(
     repo_id="atandra2000/sd-from-scratch-v1",
     filename="sd_epoch_042.pt",
+    local_dir="checkpoints",
 )
-
 ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-unet_sd = ckpt["unet_state_dict"]
 
+# Load EMA shadow (produces better images than live weights)
 unet = UNetModel(in_ch=4, out_ch=4, ch=320, res_blks=2,
                  attn_lvls=(1, 2, 3), ch_mults=(1, 2, 4, 4),
                  heads=8, ctx_dim=768)
-unet.load_state_dict(unet_sd, strict=True)
+shadow = ckpt["ema_state_dict"]["shadow"]
+cleaned = {}
+for k, v in shadow.items():
+    for prefix in ("module.", "unet.", "_orig_mod."):
+        if k.startswith(prefix):
+            k = k[len(prefix):]
+            break
+    cleaned[k] = v
+unet.load_state_dict(cleaned, strict=False)   # strict=False: a few shadow keys may be absent
+unet.eval()
 ```
+
+See `src/inference.py:load_ema_unet()` for the canonical loader used in production.
 
 ---
 
@@ -240,17 +254,29 @@ python src/inference.py \
 ### Python API
 
 ```python
-from src.generate import generate_images
+import sys
+sys.path.insert(0, "src")
 
-images = generate_images(
-    prompts=["a beautiful sunset over mountains"],
-    checkpoint_path="checkpoints/sd_epoch_042.pt",
-    num_steps=50,
-    guidance_scale=7.5,
-    seed=42,
+import torch
+from transformers import CLIPTokenizer
+from generate import load_model, generate
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model  = load_model("checkpoints/sd_epoch_042.pt", device)
+tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+
+images = generate(
+    model          = model,
+    tokenizer      = tokenizer,
+    prompts        = ["a beautiful sunset over mountains"],
+    num_steps      = 50,
+    guidance_scale = 7.5,
+    seed           = 42,
+    output_path    = "output.png",
 )
-images[0].save("output.png")
 ```
+
+Note: `generate()` is the function in `src/generate.py`. It takes a loaded `StableDiffusionModel`, not a checkpoint path — that's what `load_model()` is for above.
 
 See [docs/inference.md](docs/inference.md) for all options.
 
