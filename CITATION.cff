@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+title: "Stable Diffusion from Scratch (SD-From-Scratch v1)"
+message: "If you use this software or the released checkpoint, please cite it as below."
+type: software
+authors:
+  - given-names: Atandra
+    family-names: Bharati
+    email: atandrabharati@gmail.com
+repository-code: "https://github.com/atandra2000/StableDiffusion"
+url: "https://github.com/atandra2000/StableDiffusion"
+abstract: >-
+  A Stable Diffusion 1.x-class latent diffusion model implemented and
+  trained entirely from scratch in PyTorch on 2× RTX 5090 (Blackwell) GPUs.
+  Provides the full UNet (~860M params), DDPM/DDIM schedulers, LAION data
+  pipeline, dual-GPU latent encoding, DDP+BF16 training loop, and
+  CUDA/MPS inference. Released checkpoint sd_epoch_042.pt is hosted on
+  Hugging Face Hub at atandra2000/sd-from-scratch-v1.
+license: MIT
+version: "1.0.0"
+date-released: 2026-06-02
+keywords:
+  - stable-diffusion
+  - latent-diffusion
+  - diffusion-models
+  - pytorch
+  - text-to-image
+  - generative-ai
+  - from-scratch
+  - rtx-5090
+  - blackwell
+  - ddp
+preferred-citation:
+  type: software
+  authors:
+    - given-names: Atandra
+      family-names: Bharati
+  title: "SD-From-Scratch v1: A Stable-Diffusion-class latent diffusion model trained from scratch on dual RTX 5090s"
+  year: 2026
+  url: "https://huggingface.co/atandra2000/sd-from-scratch-v1"

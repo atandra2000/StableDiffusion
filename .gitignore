@@ -1,18 +1,37 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 .Python
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
 .env
+.env.local
+.env.*.local
 .venv
 venv/
+diffusion/
+
+# Secrets (defensive — never commit raw token files)
+secrets/
+*.pem
+*.key
 
 # Checkpoints and model weights
 *.pt
 *.pth
+*.ckpt
 *.safetensors
+*.bin
 checkpoints/
 outputs/
 
@@ -21,13 +40,29 @@ outputs/
 *.parquet
 *.tar
 *.zip
+*.tgz
+*.h5
+*.hdf5
+*.arrow
+*.lance
 laion_*/
+vggface_*/
+coco_*/
+dm_*/
+p7_*/
 /workspace/
 
-# Training logs and wandb
+# HF/HuggingFace caches
+.hf-cache/
+.cache/huggingface/
+
+# Training logs and W&B
 *.log
+logs/
 wandb/
 training.log
+runs/
+tb_logs/
 
 # Generated images (exclude training validation grids, keep curated samples)
 val_epoch_*.png
@@ -35,13 +70,20 @@ results/*.png
 !results/samples/
 !results/samples/*.png
 !assets/*.png
+!docs/images/
 
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
 
-# IDE
+# IDE / editor
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
+
+# OS
 .DS_Store
+Thumbs.db
+desktop.ini
