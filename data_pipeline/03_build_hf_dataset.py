@@ -12,21 +12,18 @@ This version is **hybrid only**:
 This is the recommended, production-grade setup.
 """
 
-import os
 import sys
-import glob
 import logging
 import argparse
 import time
 import json
 from pathlib import Path
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-from datasets import Dataset, DatasetDict
+from datasets import Dataset
 
 logging.basicConfig(
     level=logging.INFO,
