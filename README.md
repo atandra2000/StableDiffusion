@@ -74,55 +74,223 @@ See [docs/inference.md](docs/inference.md) for advanced usage (negative prompts,
 
 ## Architecture
 
-```
-TEXT PROMPT
-    │
-    ▼
-┌──────────────────────────────────┐
-│  CLIP Text Encoder (frozen)      │  openai/clip-vit-large-patch14
-│  77 tokens → (B, 77, 768)        │  123M params — no gradient
-└──────────────────┬───────────────┘
-                   │  context (B, 77, 768)
-                   │
-IMAGE              │
-    │              │
-    ▼              │
-┌──────────────────────────────────┐
-│  VAE Encoder (frozen)            │  stabilityai/sd-vae-ft-mse
-│  (B,3,512,512) → (B,4,64,64)     │  83M params — no gradient
-└──────────────────┬───────────────┘
-                   │  latent z
-                   ▼
-           ┌───────────────┐
-           │  add_noise(z,t)│  DDPM forward: z_t = √ᾱ_t·z + √(1-ᾱ_t)·ε
-           └───────┬───────┘
-                   │  (B, 4, 64, 64)  noisy latent
-                   ▼
-┌──────────────────────────────────┐
-│  UNet Denoising Model            │  ~860M params — TRAINABLE
-│                                  │
-│  Encoder:                        │
-│    Stage 0 (64×64):  320 ch      │  — no attention
-│    Stage 1 (32×32):  640 ch      │  ← SpatialTransformer (cross-attn)
-│    Stage 2 (16×16): 1280 ch      │  ← SpatialTransformer (cross-attn)
-│    Stage 3  (8×8):  1280 ch      │  ← SpatialTransformer (cross-attn)
-│  Bottleneck (8×8):  1280 ch      │  ← attn + resblock
-│  Decoder:                        │
-│    Stage 3  (8×8):  1280 ch      │  ← SpatialTransformer (cross-attn)
-│    Stage 2 (16×16): 1280 ch      │  ← SpatialTransformer (cross-attn)
-│    Stage 1 (32×32):  640 ch      │  ← SpatialTransformer (cross-attn)
-│    Stage 0 (64×64):  320 ch      │  — no attention
-│                                  │
-│  ε_θ(z_t, t, ctx) → (B, 4, 64, 64)
-└──────────────────┬───────────────┘
-                   │  predicted noise ε̂
-                   │
-            MSE Loss: ||ε̂ − ε||²
-                   │
-              ▽ (backprop)
+### System Overview
+
+```mermaid
+flowchart TB
+    subgraph IN["Inputs"]
+        TXT["Prompt<br/>(string)"]:::in
+        IMG["Image<br/>(B, 3, 512, 512)"]:::in
+    end
+    subgraph FROZEN["Frozen Encoders — no gradient"]
+        CLIP["CLIP Text Encoder<br/>openai/clip-vit-large-patch14<br/>77 tokens → (B, 77, 768)"]:::clip
+        VAE["VAE<br/>stabilityai/sd-vae-ft-mse<br/>(B,3,512,512) → (B,4,64,64)<br/>scale_factor=0.18215"]:::vae
+    end
+    subgraph LAT["Latent Diffusion — trainable UNet (860M params)"]
+        direction TB
+        Z["z₀ clean latent<br/>(B, 4, 64, 64)"]:::lat
+        NOISE["add noise(z₀, t)<br/>z_t = √ᾱ_t·z₀ + √(1−ᾱ_t)·ε<br/>t ~ U(0, 1000)"]:::noisy
+        UNET["UNetModel ε_θ(z_t, t, ctx)<br/>ch=320, mults=(1,2,4,4)<br/>8 stages + bottleneck<br/>SpatialTransformer at 32/16/8²"]:::unet
+        PRED["predicted noise ε̂<br/>(B, 4, 64, 64)"]:::lat
+    end
+    LOSS["Min-SNR-weighted MSE<br/>weight = min(SNR(t), γ=5) / SNR(t)<br/>loss = ||ε̂ − ε||²"]:::loss
+    BACK["▽ backprop<br/>(UNet only)"]:::bp
+
+    TXT --> CLIP --> UNET
+    IMG --> VAE --> Z --> NOISE --> UNET --> PRED --> LOSS
+    EPS["ε ~ 𝒩(0, I)"]:::noise --> NOISE
+    EPS -. target .-> LOSS
+    LOSS --> BACK
+
+    classDef in fill:#e0e7ff,stroke:#3730a3,color:#000
+    classDef clip fill:#fed7aa,stroke:#9a3412,color:#000
+    classDef vae fill:#fbcfe8,stroke:#831843,color:#000
+    classDef lat fill:#f3f4f6,stroke:#374151,color:#000
+    classDef noisy fill:#fde68a,stroke:#b45309,color:#000
+    classDef noise fill:#e0e7ff,stroke:#3730a3,color:#000
+    classDef unet fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef loss fill:#fce7f3,stroke:#9d174d,color:#000
+    classDef bp fill:#bbf7d0,stroke:#15803d,color:#000
 ```
 
+> **Frozen vs Trainable:** CLIP (123M) and VAE (83M) are frozen; only the UNet (~860M, ~80% of total parameters) receives gradient. The loss targets the predicted noise ε̂ against the sampled noise ε.
+
+---
+
+### UNet (860M params) — the trainable component
+
+```mermaid
+flowchart TB
+    X["z_t  noisy latent<br/>(B, 4, 64, 64)"]:::in
+    T_EMB["timestep t<br/>sinusoidal → MLP → 1280-d<br/>injected into every ResBlock"]:::te
+    CTX["text context from CLIP<br/>(B, 77, 768)"]:::ctx
+
+    subgraph DOWN["Encoder (Down path)"]
+        direction TB
+        D0["Stage 0 — 64×64<br/>320 ch · 2× ResBlock<br/><i>no attention</i>"]:::down0
+        D1["Stage 1 — 32×32<br/>640 ch · 2× ResBlock<br/>+ SpatialTransformer<br/>(self + cross-attn)"]:::down1
+        D2["Stage 2 — 16×16<br/>1280 ch · 2× ResBlock<br/>+ SpatialTransformer"]:::down1
+        D3["Stage 3 — 8×8<br/>1280 ch · 2× ResBlock<br/>+ SpatialTransformer"]:::down1
+        BN["Bottleneck — 8×8<br/>1280 ch · ResBlock + Attn"]:::btn
+    end
+
+    subgraph UP["Decoder (Up path, mirror of encoder)"]
+        direction TB
+        U3["Stage 3 — 8×8<br/>1280 ch · + skip from D3<br/>+ SpatialTransformer"]:::up1
+        U2["Stage 2 — 16×16<br/>1280 ch · + skip from D2<br/>+ SpatialTransformer"]:::up1
+        U1["Stage 1 — 32×32<br/>640 ch · + skip from D1<br/>+ SpatialTransformer"]:::up1
+        U0["Stage 0 — 64×64<br/>320 ch · + skip from D0<br/><i>no attention</i>"]:::up0
+    end
+
+    OUT["predicted noise ε̂<br/>(B, 4, 64, 64)"]:::out
+
+    X --> D0 --> D1 --> D2 --> D3 --> BN --> U3 --> U2 --> U1 --> U0 --> OUT
+    T_EMB -. FiLM .-> D0
+    T_EMB -. FiLM .-> D1
+    T_EMB -. FiLM .-> D2
+    T_EMB -. FiLM .-> D3
+    T_EMB -. FiLM .-> BN
+    T_EMB -. FiLM .-> U3
+    T_EMB -. FiLM .-> U2
+    T_EMB -. FiLM .-> U1
+    T_EMB -. FiLM .-> U0
+    CTX --> D1
+    CTX --> D2
+    CTX --> D3
+    CTX --> BN
+    CTX --> U3
+    CTX --> U2
+    CTX --> U1
+
+    classDef in fill:#e0e7ff,stroke:#3730a3,color:#000
+    classDef te fill:#fef3c7,stroke:#92400e,color:#000
+    classDef ctx fill:#fed7aa,stroke:#9a3412,color:#000
+    classDef down0 fill:#f3f4f6,stroke:#374151,color:#000
+    classDef down1 fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef btn fill:#fde68a,stroke:#b45309,color:#000
+    classDef up0 fill:#f3f4f6,stroke:#374151,color:#000
+    classDef up1 fill:#bbf7d0,stroke:#15803d,color:#000
+    classDef out fill:#bbf7d0,stroke:#15803d,color:#000
+```
+
+> **Skip connections:** every encoder stage's output is concatenated with the corresponding decoder stage's input (U-Net). The U-shape is the whole point — high-resolution features from the encoder flow directly to the decoder for pixel-accurate reconstruction.
+>
+> **Why Stage 0 has no attention:** at 64×64 spatial, self-attention is O(N²) on 4096 tokens = 16M attention scores per head. The first stage skips it and lets the convolutions do feature extraction at high spatial resolution; attention kicks in at 32×32 and below where the token count drops to 1024 / 256 / 64.
+
+### UNet Block internals — what each stage contains
+
+```mermaid
+flowchart LR
+    H["h"]:::in --> RB1["ResBlock<br/>GN → SiLU → Conv3×3<br/>+ t-embed (FiLM)<br/>─────────────<br/>GN → SiLU → Conv3×3"]:::rb --> RB2["ResBlock<br/>(identical)"]:::rb --> NORM["GroupNorm"]:::norm
+    NORM --> ST["SpatialTransformer"]:::st --> OUT["h']"]:::out
+    H -. residual .-> RB2
+    RB2 -. residual .-> OUT
+
+    ST_IN["text ctx (B, 77, 768)"]:::ctx --> ST
+    T_IN["t (1280-d)"]:::te --> RB1
+
+    classDef in fill:#e0e7ff,stroke:#3730a3,color:#000
+    classDef out fill:#bbf7d0,stroke:#15803d,color:#000
+    classDef rb fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef norm fill:#f3f4f6,stroke:#374151,color:#000
+    classDef st fill:#fce7f3,stroke:#9d174d,color:#000
+    classDef ctx fill:#fed7aa,stroke:#9a3412,color:#000
+    classDef te fill:#fef3c7,stroke:#92400e,color:#000
+```
+
+> **SpatialTransformer = GroupNorm → Conv 1×1 (proj) → LayerNorm → multi-head self-attention → LayerNorm → cross-attention (text as K,V) → LayerNorm → FFN → residual.** Two of these blocks stack per stage (except Stage 0, which skips them entirely). Cross-attention is the only place the CLIP text embedding enters the UNet.
+
+---
+
+### Inference — DDIM 50–100 steps with CFG
+
+```mermaid
+flowchart TB
+    subgraph CFG["Classifier-Free Guidance"]
+        direction LR
+        PR["prompt"]:::in --> C1["CLIP"]:::clip --> CX1["ctx"]:::ctx
+        NP["∅ empty prompt<br/>(CFG dropout 0.1)"]:::in --> C2["CLIP"]:::clip --> CX2["∅ ctx"]:::ctx
+    end
+    CX1 --> LOOP
+    CX2 --> LOOP
+
+    Z["z_T ~ 𝒩(0, I)<br/>(B, 4, 64, 64)"]:::in --> LOOP["DDIM deterministic loop<br/>t = 999 → 0<br/>50–100 steps<br/>──────────────────<br/>ε̂_uncond = UNet(z_t, t, ∅)<br/>ε̂_cond   = UNet(z_t, t, ctx)<br/>ε̂_cfg    = ε̂_uncond + s·(ε̂_cond − ε̂_uncond)<br/>            s = 7.5"]:::loop
+    EMA["UNetModel<br/>(EMA weights · decay 0.9999)"]:::unet --> LOOP
+    LOOP --> Z0["z₀ predicted clean latent"]:::lat
+    Z0 -. decode .-> DEC["VAE Decoder"]:::vae
+    DEC --> IMG["Generated image<br/>(B, 3, 512, 512)"]:::out
+
+    LOOP -. "x_{t−1} = √ᾱ_{t−1}·x̂₀ + √(1−ᾱ_{t−1})·ε̂_cfg" .-> Z0
+
+    classDef in fill:#e0e7ff,stroke:#3730a3,color:#000
+    classDef clip fill:#fed7aa,stroke:#9a3412,color:#000
+    classDef ctx fill:#fed7aa,stroke:#9a3412,color:#000
+    classDef unet fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef loop fill:#fce7f3,stroke:#9d174d,color:#000
+    classDef lat fill:#f3f4f6,stroke:#374151,color:#000
+    classDef vae fill:#fbcfe8,stroke:#831843,color:#000
+    classDef out fill:#bbf7d0,stroke:#15803d,color:#000
+```
+
+> **EMA weights are used for inference** (not the live training weights). EMA shadow decays at 0.9999 with warmup correction and produces visibly cleaner samples.
+>
+> **CFG scale s=7.5** is the standard SD-1.x default. Lower values (3–5) give more creative/diverse outputs; higher values (10–15) over-condition on the prompt at the cost of diversity.
+>
+> **Use `inference.py` not `SD_ImageGen.py`.** The legacy `SD_ImageGen.py` clamps `pred_x0` to `[-1, 1]` — correct for *pixels* but destructive for *latents* (which have std ≈ 4). `inference.py` skips the clamp.
+
+---
+
+### Training Stack (DDP / BF16 / FA2 / EMA / Min-SNR)
+
+```mermaid
+flowchart TB
+    subgraph H["Hardware & Runtime"]
+        direction LR
+        GPU["2× RTX 5090<br/>(Blackwell sm_120)"]:::hw
+        BF16["BF16 native<br/>(no GradScaler)"]:::hw
+        FA2["Flash SDP on<br/>(math kernel off)"]:::hw
+        CL["channels_last<br/>(mandatory on Blackwell)"]:::hw
+        GC["gradient checkpointing<br/>~40% VRAM saved"]:::hw
+    end
+    subgraph L["Loss"]
+        direction LR
+        L1["ε-prediction MSE"]:::l
+        L2["Min-SNR weighting<br/>γ = 5.0 → 2.5 (fine-tune)"]:::l
+        L3["CFG dropout 0.05–0.15"]:::l
+    end
+    subgraph O["Optimiser & Schedule"]
+        direction LR
+        OP["AdamW (fused)<br/>lr 1e-4 → 1e-5"]:::o
+        SCH["500-step warmup<br/>+ CosineAnnealing"]:::o
+        GCLIP["grad clip 1.0"]:::o
+        ATOM["atomic checkpoint<br/>.tmp.pt → os.replace"]:::o
+    end
+    subgraph E["EMA"]
+        direction LR
+        EMA["decay = 0.9999<br/>warmup-corrected<br/>GPU-resident shadow<br/>used at inference"]:::e
+    end
+
+    H --> L --> O --> CKPT["checkpoint .pt"]:::ckpt
+    E --> CKPT
+    CKPT -.->|load EMA shadow| INFER["inference.py<br/>uses EMA weights"]:::inf
+
+    classDef hw fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef l fill:#fce7f3,stroke:#9d174d,color:#000
+    classDef o fill:#fde68a,stroke:#b45309,color:#000
+    classDef e fill:#fed7aa,stroke:#9a3412,color:#000
+    classDef ckpt fill:#bbf7d0,stroke:#15803d,color:#000
+    classDef inf fill:#bbf7d0,stroke:#15803d,color:#000
+```
+
+> **Zero-init on every output projection** — `nn.init.zeros_` on `nn.Conv2d` and `nn.Linear` outputs. The model starts as the identity `ε̂ = z_t` and learns the residual. Removing this causes early-training divergence.
+>
+> **DDP NCCL over BF16** with `torch.backends.cuda.enable_flash_sdp(True)` and `model.to(memory_format=torch.channels_last)` is the canonical recipe for Blackwell. No `torch.cuda.amp.GradScaler` — BF16 has the exponent range to skip it.
+
+
+---
+
 For a detailed architectural walkthrough, see [docs/architecture.md](docs/architecture.md).
+, see [docs/architecture.md](docs/architecture.md).
 
 ---
 
