@@ -25,82 +25,57 @@ The model implements the full latent diffusion pipeline from Rombach et al. (202
 
 The denoising backbone is a U-Net with spatial self-attention and cross-attention for text conditioning:
 
-```mermaid
-flowchart TB
-    X["z_t  noisy latent<br/>(B, 4, 64, 64)"]:::in
-    T_EMB["timestep t<br/>sinusoidal → MLP → 1280-d<br/>injected into every ResBlock"]:::te
-    CTX["text context from CLIP<br/>(B, 77, 768)"]:::ctx
-
-    subgraph DOWN["Encoder (Down path)"]
-        direction TB
-        D0["Stage 0 — 64×64<br/>320 ch · 2× ResBlock<br/><i>no attention</i>"]:::down0
-        D1["Stage 1 — 32×32<br/>640 ch · 2× ResBlock<br/>+ SpatialTransformer<br/>(self + cross-attn)"]:::down1
-        D2["Stage 2 — 16×16<br/>1280 ch · 2× ResBlock<br/>+ SpatialTransformer"]:::down1
-        D3["Stage 3 — 8×8<br/>1280 ch · 2× ResBlock<br/>+ SpatialTransformer"]:::down1
-        BN["Bottleneck — 8×8<br/>1280 ch · ResBlock + Attn"]:::btn
-    end
-
-    subgraph UP["Decoder (Up path, mirror of encoder)"]
-        direction TB
-        U3["Stage 3 — 8×8<br/>1280 ch · + skip from D3<br/>+ SpatialTransformer"]:::up1
-        U2["Stage 2 — 16×16<br/>1280 ch · + skip from D2<br/>+ SpatialTransformer"]:::up1
-        U1["Stage 1 — 32×32<br/>640 ch · + skip from D1<br/>+ SpatialTransformer"]:::up1
-        U0["Stage 0 — 64×64<br/>320 ch · + skip from D0<br/><i>no attention</i>"]:::up0
-    end
-
-    OUT["predicted noise ε̂<br/>(B, 4, 64, 64)"]:::out
-
-    X --> D0 --> D1 --> D2 --> D3 --> BN --> U3 --> U2 --> U1 --> U0 --> OUT
-    T_EMB -. FiLM .-> D0
-    T_EMB -. FiLM .-> D1
-    T_EMB -. FiLM .-> D2
-    T_EMB -. FiLM .-> D3
-    T_EMB -. FiLM .-> BN
-    T_EMB -. FiLM .-> U3
-    T_EMB -. FiLM .-> U2
-    T_EMB -. FiLM .-> U1
-    T_EMB -. FiLM .-> U0
-    CTX --> D1
-    CTX --> D2
-    CTX --> D3
-    CTX --> BN
-    CTX --> U3
-    CTX --> U2
-    CTX --> U1
-
-    classDef in fill:#e0e7ff,stroke:#3730a3,color:#000
-    classDef te fill:#fef3c7,stroke:#92400e,color:#000
-    classDef ctx fill:#fed7aa,stroke:#9a3412,color:#000
-    classDef down0 fill:#f3f4f6,stroke:#374151,color:#000
-    classDef down1 fill:#dbeafe,stroke:#1d4ed8,color:#000
-    classDef btn fill:#fde68a,stroke:#b45309,color:#000
-    classDef up0 fill:#f3f4f6,stroke:#374151,color:#000
-    classDef up1 fill:#bbf7d0,stroke:#15803d,color:#000
-    classDef out fill:#bbf7d0,stroke:#15803d,color:#000
 ```
-
-#### Block internals: ResBlock + SpatialTransformer
-
-```mermaid
-flowchart LR
-    H["h"]:::in --> RB1["ResBlock<br/>GN → SiLU → Conv3×3<br/>+ t-embed (FiLM)<br/>─────────────<br/>GN → SiLU → Conv3×3"]:::rb --> RB2["ResBlock<br/>(identical)"]:::rb --> NORM["GroupNorm"]:::norm
-    NORM --> ST["SpatialTransformer<br/>LN → self-attn<br/>LN → cross-attn (ctx)<br/>LN → FFN"]:::st --> OUT["h'"]:::out
-    H -. residual .-> RB2
-    RB2 -. residual .-> OUT
-
-    ST_IN["text ctx (B, 77, 768)"]:::ctx --> ST
-    T_IN["t (1280-d)"]:::te --> RB1
-
-    classDef in fill:#e0e7ff,stroke:#3730a3,color:#000
-    classDef out fill:#bbf7d0,stroke:#15803d,color:#000
-    classDef rb fill:#dbeafe,stroke:#1d4ed8,color:#000
-    classDef norm fill:#f3f4f6,stroke:#374151,color:#000
-    classDef st fill:#fce7f3,stroke:#9d174d,color:#000
-    classDef ctx fill:#fed7aa,stroke:#9a3412,color:#000
-    classDef te fill:#fef3c7,stroke:#92400e,color:#000
+                                  INPUT (4, 64, 64)
+                                       │
+                          ┌────────────┴────────────┐
+                          │  Conv2d 3×3              │  out=320
+                          └────────────┬────────────┘
+                                       │
+                          ┌────────────┴────────────┐
+                          │  Block 0 (64×64)        │  320 ch, 2× ResNetBlock
+                          │  No attention            │  skip → decoder
+                          └────────────┬────────────┘
+                                       │
+                          ┌────────────┴────────────┐
+                          │  Downsample 2×           │
+                          └────────────┬────────────┘
+                          ┌────────────┴────────────┐
+                          │  Block 1 (32×32)        │  640 ch, 2× ResNetBlock
+                          │  ★ SpatialTransformer   │  cross-attn on text (768)
+                          └────────────┬────────────┘
+                                       │
+                          ┌────────────┴────────────┐
+                          │  Downsample 2×           │
+                          └────────────┬────────────┘
+                          ┌────────────┴────────────┐
+                          │  Block 2 (16×16)        │  1280 ch, 2× ResNetBlock
+                          │  ★ SpatialTransformer   │  cross-attn on text (768)
+                          └────────────┬────────────┘
+                                       │
+                          ┌────────────┴────────────┐
+                          │  Downsample 2×           │
+                          └────────────┬────────────┘
+                          ┌────────────┴────────────┐
+                          │  Block 3 (8×8)          │  1280 ch, 2× ResNetBlock
+                          │  ★ SpatialTransformer   │  cross-attn on text (768)
+                          └────────────┬────────────┘
+                                       │
+                          ┌────────────┴────────────┐
+                          │  Bottleneck (8×8)       │  1280 ch, ResNet + Attn
+                          └────────────┬────────────┘
+                                       │
+              ┌────────────────────────┼────────────────────────┐
+              │  Mirror decoder with   │  skip connections from │
+              │  same block structure  │  encoder                │
+              └────────────────────────┼────────────────────────┘
+                                       │
+                          ┌────────────┴────────────┐
+                          │  Output Conv2d 3×3       │  out=4 (latent channels)
+                          └────────────┬────────────┘
+                                       │
+                                  OUTPUT (4, 64, 64)
 ```
-
-#### Key implementation details:
 
 #### Key implementation details:
 
